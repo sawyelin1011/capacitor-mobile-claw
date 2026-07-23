@@ -1,0 +1,123 @@
+name: Build & Upload Debug APK
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'android/**'
+      - 'src/**'
+      - 'examples/reference-app/**'
+      - '.github/workflows/build-debug-apk.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'android/**'
+      - 'src/**'
+      - 'examples/reference-app/**'
+  workflow_dispatch:
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Run linter
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Install reference-app dependencies
+        working-directory: examples/reference-app
+        run: npm install
+
+      - name: Sync Capacitor
+        working-directory: examples/reference-app
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: examples/reference-app
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: debug-apk-${{ github.run_id }}
+          path: examples/reference-app/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Create GitHub Release (on tag)
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/') && success()
+        with:
+          files: examples/reference-app/android/app/build/outputs/apk/debug/app-debug.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request' && success()
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `✅ **Debug APK built successfully!**\n\n📦 **Artifact**: [\`debug-apk-${{ github.run_id }}\`](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n\nYou can download the APK from the workflow artifacts.`
+            })
+
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "## 🔨 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Workflow | ${{ github.workflow }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ref | ${{ github.ref }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run ID | [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
+          if [ -f "examples/reference-app/android/app/build/outputs/apk/debug/app-debug.apk" ]; then
+            SIZE=$(du -h examples/reference-app/android/app/build/outputs/apk/debug/app-debug.apk | cut -f1)
+            echo "| APK Size | $SIZE |" >> $GITHUB_STEP_SUMMARY
+          fi
